@@ -1,0 +1,264 @@
+---
+title: "p8105_hw6_aw3621"
+author: "Anni Wang"
+date: "2024-12-02"
+output: html_document
+---
+
+```{r}
+library(rnoaa)
+library(dplyr)
+library(ggplot2)
+library(broom)
+library(tidyverse)
+library(p8105.datasets)
+library(ggplot2)
+library(modelr)
+set.seed(1)
+```
+
+###Problem 1
+```{r}
+weather_df = 
+  rnoaa::meteo_pull_monitors(
+    c("USW00094728"),
+    var = c("PRCP", "TMIN", "TMAX"), 
+    date_min = "2017-01-01",
+    date_max = "2017-12-31") %>%
+  mutate(
+    name = recode(id, USW00094728 = "CentralPark_NY"),
+    tmin = tmin / 10,
+    tmax = tmax / 10) %>%
+  select(name, id, everything())
+```
+```{r}
+bootstrap_samples <- modelr::bootstrap(weather_df, 5000)
+
+bootstrap_results <- bootstrap_samples %>%
+  mutate(
+    model = map(strap, ~ lm(tmax ~ tmin, data = as_tibble(.x))),
+    r_squared = map_dbl(model, ~ broom::glance(.x)[["r.squared"]]),
+    log_coef_product = map_dbl(model, ~ {
+      coef_vals <- broom::tidy(.x) %>% pull(estimate)
+      log(coef_vals[1] * coef_vals[2])
+    })
+  )
+
+# Plotting results
+bootstrap_results %>%
+  ggplot(aes(x = r_squared)) +
+  geom_density(fill = "blue", alpha = 0.5) +
+  labs(title = "Distribution of R-squared from Bootstrap Samples",
+       x = "R-squared",
+       y = "Density") +
+  theme_minimal()
+
+bootstrap_results %>%
+  ggplot(aes(x = log_coef_product)) +
+  geom_density(fill = "pink", alpha = 0.5) +
+  labs(title = "Distribution of log(beta0 * beta1) from Bootstrap Samples",
+       x = "log(beta0 * beta1)",
+       y = "Density") +
+  theme_minimal()
+
+# Confidence intervals
+ci_r_squared <- quantile(bootstrap_results %>% pull(r_squared), c(0.025, 0.975))
+ci_log_coef_product <- quantile(bootstrap_results %>% pull(log_coef_product), c(0.025, 0.975))
+
+print(paste("95% CI for R-squared:", ci_r_squared[1], "-", ci_r_squared[2]))
+print(paste("95% CI for log(beta0 * beta1):", ci_log_coef_product[1], "-", ci_log_coef_product[2]))
+```
+###Problem 2
+```{r}
+homicide_df = read_csv(file = "data/homicide-data.csv", na = c("Unknown", "NA", "")) |>
+  mutate(reported_date = as.Date(as.character(reported_date), format = "%Y%m%d"))
+```
+```{r}
+#Create a city_state variable (e.g. “Baltimore, MD”), and a binary variable indicating whether the homicide is solved.Omit cities Dallas, TX; Phoenix, AZ; and Kansas City, MO – these don’t report victim race. Also omit Tulsa, AL 
+homicide_df <- homicide_df %>%
+  mutate(
+    city_state = str_c(city, state, sep = ", "),
+    solved = if_else(disposition == "Closed by arrest", 1, 0),
+    victim_age = as.numeric(victim_age)
+  ) %>%
+  filter(
+    !city_state %in% c("Dallas, TX", "Phoenix, AZ", "Kansas City, MO", "Tulsa, AL"),
+    victim_race %in% c("White", "Black")
+  )
+```
+
+```{r}
+##For the city of Baltimore, MD, use the glm function to fit a logistic regression with resolved vs unresolved as the outcome and victim age, sex and race as predictors. 
+baltimore_reg <- homicide_df |>
+  filter(city_state == "Baltimore, MD")
+logistic_model <- glm(solved ~ victim_age + victim_sex + victim_race, 
+                      data = baltimore_reg, family = binomial())
+```
+
+```{r}
+##Save the output of glm as an R object; apply the broom::tidy to this object; and obtain the estimate and confidence interval of the adjusted odds ratio for solving homicides comparing male victims to female victims keeping all other variables fixed.
+logistic_model %>%
+  broom::tidy(conf.int = TRUE) %>%
+  filter(term == "victim_sexMale") %>% 
+  mutate(
+    OR = exp(estimate),
+    CI_low = exp(conf.low),
+    CI_high = exp(conf.high)
+  ) |> 
+  select(OR, CI_low, CI_high)%>%
+  knitr::kable(digits = 3)
+
+```
+OR=0.426 with 95%CI (0.324,0.558)
+```{r}
+##Now run glm for each of the cities in your dataset, and extract the adjusted odds ratio (and CI) for solving homicides comparing male victims to female victims. Do this within a “tidy” pipeline, making use of purrr::map, list columns, and unnest as necessary to create a dataframe with estimated ORs and CIs for each city.
+eachcity <- homicide_df %>%
+  group_by(city_state) %>%
+  nest() %>%
+  mutate(
+    model = map(data, ~ glm(solved ~ victim_age + victim_sex + victim_race, data = ., family = binomial())),
+    results = map(model, ~ tidy(., conf.int = TRUE) %>%
+                   filter(term == "victim_sexMale") %>%
+                   mutate(
+                     OR = exp(estimate),
+                     CI_low = exp(conf.low),
+                     CI_high = exp(conf.high)
+                   ) %>%
+                   select(OR, CI_low, CI_high)
+    )
+  ) %>%
+  unnest(results) %>%
+  select(city_state, OR, CI_low, CI_high)
+eachcity %>%
+  knitr::kable(digits = 3)
+
+```
+```{r}
+##Create a plot that shows the estimated ORs and CIs for each city. Organize cities according to estimated OR, and comment on the plot.
+
+eachcity<- eachcity %>%
+  arrange(OR)
+ggplot(eachcity, aes(x = reorder(city_state, OR), y = OR)) +
+  geom_point() +  # Add points for ORs
+  geom_errorbar(aes(ymin = CI_low, ymax = CI_high), width = 0.2) +  
+  coord_flip() +  
+  labs(x = "City", y = "Odds Ratio (Male vs Female)", title = "Odds Ratios and Confidence Intervals by City") +
+  theme_minimal() +  
+  theme(axis.text.x = element_text(angle = 45, hjust = 1))
+```
+Cities with an Odds Ratio (OR) greater than 1 suggest no significant difference in the resolution rates between male and female victims. Albuquerque, NM shows the highest OR along with the broadest 95% confidence interval. Other cities like Stockton, CA, and Fresno, CA also display notably high ORs above 1.
+
+##Promblem 3
+```{r}
+#Load and clean the data for regression analysis
+birthweight_df <- read_csv("data/birthweight.csv")
+
+birthweight_df <- birthweight_df %>%
+  janitor::clean_names() %>%
+  mutate(
+    babysex = case_when(
+      babysex == 1 ~ "male",
+      babysex == 2 ~ "female"
+    ),
+    babysex = fct_infreq(babysex),
+    frace = case_when(
+      frace == 1 ~ "white",
+      frace == 2 ~ "black",
+      frace == 3 ~ "asian",
+      frace == 4 ~ "puerto rican",
+      frace == 8 ~ "other"
+    ),
+    frace = fct_infreq(frace),
+    mrace = case_when(
+      mrace == 1 ~ "white",
+      mrace == 2 ~ "black",
+      mrace == 3 ~ "asian",
+      mrace == 4 ~ "puerto rican",
+      mrace == 8 ~ "other"
+    ),
+    mrace = fct_infreq(mrace),
+        malform = as.logical(malform)
+  ) %>%
+  drop_na()
+
+```
+```{r}
+#Propose a regression model for birthweight. 
+bw_regression_model <- lm(bwt ~ babysex + bhead + blength + delwt + fincome + frace + gaweeks + malform + menarche + mheight + momage + mrace + parity + pnumlbw + pnumsga + ppbmi + ppwt + smoken + wtgain, data = birthweight_df)
+
+summary(bw_regression_model)
+#Describe your modeling process and show a plot of model residuals against fitted values – use add_predictions and add_residuals in making this plot.
+# Adding predictions and residuals to the dataset
+birthweight_df <- birthweight_df %>%
+  add_predictions(bw_regression_model) %>%
+  add_residuals(bw_regression_model)
+
+# Create a plot of residuals against fitted values
+ggplot(birthweight_df, aes(x = pred, y = resid)) +
+  geom_point(alpha = 0.5) + 
+  geom_smooth(method = "loess", se = FALSE, color = "purple") +  
+  labs(
+    title = "Residuals vs Fitted Values",
+    x = "Fitted Values (Predicted Birthweight)",
+    y = "Residuals"
+  ) +
+  theme_minimal()
+```
+Description:
+The regression model predicts birthweight using variables that reflect socioeconomic status and biological factors likely to influence it. These variables include the family's monthly income, the duration of the pregnancy in weeks, the mother's weight before pregnancy, body mass index before pregnancy, any malformations affecting birthweight, and the average number of cigarettes she smoked daily during pregnancy. These predictors were chosen based on their relevance to both the mother's health and external socioeconomic factors. After fitting the model, the summary was checked to assess the impact of each predictor on birthweight and to understand the overall effectiveness of the model in explaining the variation in birthweight.
+```{r}
+#Compare your model to two others:
+#One using length at birth and gestational age as predictors (main effects only)
+#One using head circumference, length, sex, and all interactions (including the three-way interaction) between these
+
+models <- list(
+  model1 = lm(bwt ~ gaweeks + blength, data = birthweight_df),
+  model2 = lm(bwt ~ bhead * blength * babysex, data = birthweight_df),
+  model3 = lm(bwt ~ fincome + gaweeks + ppwt + ppbmi + malform + smoken, data = birthweight_df)
+)
+#Make this comparison in terms of the cross-validated prediction error; use crossv_mc and functions in purrr as appropriate.
+cv_df <- crossv_mc(birthweight_df, 100) %>% 
+  mutate(
+    train = map(train, as_tibble),
+    test = map(test, as_tibble)
+  )
+
+cv_df <- cv_df %>% 
+  mutate(
+    model1 = map(train, ~ lm(bwt ~ gaweeks + blength, data = .)),
+    model2 = map(train, ~ lm(bwt ~ bhead * blength * babysex, data = .)),
+    model3 = map(train, ~ lm(bwt ~ fincome + gaweeks + ppwt + ppbmi + malform + smoken, data = .))
+  ) %>% 
+  mutate(
+    rmse_model1 = map2_dbl(model1, test, ~ rmse(model = .x, data = .y)),
+    rmse_model2 = map2_dbl(model2, test, ~ rmse(model = .x, data = .y)),
+    rmse_model3 = map2_dbl(model3, test, ~ rmse(model = .x, data = .y))
+  )
+
+cv_df %>% 
+  select(starts_with("rmse")) %>% 
+  pivot_longer(
+    everything(),
+    names_to = "model", 
+    values_to = "rmse",
+    names_prefix = "rmse_"
+  ) %>% 
+  mutate(model = fct_inorder(model)) %>% 
+  ggplot(aes(x = model, y = rmse)) + 
+  geom_violin() + 
+  labs(title = "Comparison of Models", x = "Model", y = "RMSE")
+```
+
+Model 1 shows a moderately wide range of RMSE values, primarily between 350 and 400, indicating a moderate prediction error with some inconsistency across different validation splits. 
+Model 2 displays the lowest and most consistent RMSE, making it the most accurate model for predicting birthweight from the given predictors. 
+Model 3 presents the most variable RMSE distribution, spanning from below 300 to over 400, and appears bimodal, suggesting it might perform very differently depending on the specific data it's trained on, which could point to overfitting or high sensitivity to the training data. 
+The violin plot analysis suggests that Model 2 is the optimal choice for its consistently low and stable RMSE, showing it to be both effective and dependable for prediction.
+
+
+
+
+
+
+
+
+
