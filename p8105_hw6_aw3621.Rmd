@@ -2,7 +2,7 @@
 title: "p8105_hw6_aw3621"
 author: "Anni Wang"
 date: "2024-12-02"
-output: html_document
+output: git_document
 ---
 
 ```{r}
